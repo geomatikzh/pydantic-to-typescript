@@ -20,6 +20,8 @@ from typing import (
     Tuple,
     Type,
     Union,
+    Literal,
+    get_origin
 )
 from uuid import uuid4
 
@@ -31,7 +33,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from pydantic.v1.config import BaseConfig
     from pydantic.v1.fields import ModelField
 
-
+TYPE_ADAPTERS = (Union, Literal,)
 LOG = logging.getLogger("pydantic2ts")
 
 _USELESS_ENUM_DESCRIPTION = "An enumeration."
@@ -157,6 +159,64 @@ def _extract_pydantic_models(module: ModuleType) -> List[type]:
 
     return models
 
+def _can_be_pydantic_adapter(obj: Any):
+    origin = get_origin(obj)
+    for type_adapter in TYPE_ADAPTERS:
+        if origin is type_adapter:
+            return True
+    return False
+
+def _is_pydantic_adpater(obj: Any):
+    return isinstance(obj, v2.TypeAdapter)
+
+def _extract_pydantic_adapters(module: ModuleType) -> List[type]:
+    """
+    Given a module, return a list of the pydantic models contained within it.
+    """
+    adapters: List[type] = []
+    module_name = module.__name__
+
+    for adapter_name, model in inspect.getmembers(module, _can_be_pydantic_adapter):
+        adapters.append(v2.TypeAdapter(model, config=v2.ConfigDict(title=adapter_name)))
+
+    for adapter_name, adapter in inspect.getmembers(module, _is_pydantic_adpater):
+        adapter._config["title"] = adapter._config.get("title", adapter_name)
+        adapters.append(adapter)
+
+    for _, submodule in inspect.getmembers(module, lambda obj: _is_submodule(obj, module_name)):
+        adapters.extend(_extract_pydantic_adapters(submodule))
+
+    return adapters
+
+def _property_optimization(value: dict, register: Dict[str, str], defs_key: str):
+    for name, prop in value.get("properties", {}).items():
+        prop_stringify = json.dumps(prop, sort_keys=True)
+        if prop_stringify in register:
+            value["properties"][name] = {"$ref": f"#/{defs_key}/{register[prop_stringify]}"}
+        elif prop.get("properties"):
+            _property_optimization(prop["properties"], register, defs_key)
+        elif prop.get("anyOf"):
+            [_property_optimization(p, register, defs_key) for p in prop["anyOf"]]
+        elif prop.get("oneOf"):
+            [_property_optimization(p, register, defs_key) for p in prop["oneOf"]]
+    for key_type in ["anyOf", "oneOf"]:
+        arr = value.get(key_type, [])
+        for idx, prop in enumerate(arr):
+            prop_stringify = json.dumps(prop, sort_keys=True)
+            if prop_stringify in register:
+                arr[idx] = {"$ref": f"#/{defs_key}/{register[prop_stringify]}"}
+            elif prop.get("properties"):
+                _property_optimization(prop["properties"], register, defs_key)
+            elif prop.get("anyOf"):
+                [_property_optimization(p, register, defs_key) for p in prop["anyOf"]]
+            elif prop.get("oneOf"):
+                [_property_optimization(p, register, defs_key) for p in prop["oneOf"]]
+
+
+def _ref_optimization(elements: dict, defs_key: str):
+    register = {json.dumps(value, sort_keys=True): key for key, value in elements.items()}
+    for key, value in elements.items():
+        _property_optimization(value, register, defs_key)
 
 def _clean_json_schema(schema: Dict[str, Any], model: Any = None) -> None:
     """
@@ -266,7 +326,7 @@ def _schema_generation_overrides(
                 setattr(config, key, value)
 
 
-def _generate_json_schema(models: List[type]) -> str:
+def _generate_json_schema(models: List[type], adapters: Optional[List[v2.TypeAdapter]] = None) -> str:
     """
     Create a top-level '_Master_' model with references to each of the actual models.
     Generate the schema for this model, which will include the schemas for all the
@@ -293,6 +353,17 @@ def _generate_json_schema(models: List[type]) -> str:
         for name, schema in defs.items():
             _clean_json_schema(schema, models_by_name.get(name))
 
+        for adapter in adapters or []:
+            adapter_schema = adapter.json_schema()
+            if defs_key in adapter_schema:
+                del adapter_schema[defs_key]
+            adapter_name = adapter._config.get("title")
+            if adapter_name:
+                defs[adapter_name] = adapter_schema
+                master_schema["properties"][adapter_name] = {"$ref": f"#/{defs_key}/{adapter_name}"}
+        if adapters:
+            _ref_optimization(defs, defs_key)
+        
         return json.dumps(master_schema, indent=2)
 
 
@@ -335,7 +406,7 @@ def generate_typescript_defs(
 
     LOG.info("Generating JSON schema from pydantic models...")
 
-    schema = _generate_json_schema(models)
+    schema = _generate_json_schema(models, adapters)
     schema_dir = mkdtemp()
     schema_file_path = os.path.join(schema_dir, "schema.json")
 
