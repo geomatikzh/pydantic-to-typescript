@@ -33,7 +33,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from pydantic.v1.config import BaseConfig
     from pydantic.v1.fields import ModelField
 
-TYPE_ADAPTERS = (Union, Literal,)
+TYPE_ADAPTERS = (Union, Literal, List,)
 LOG = logging.getLogger("pydantic2ts")
 
 _USELESS_ENUM_DESCRIPTION = "An enumeration."
@@ -188,29 +188,38 @@ def _extract_pydantic_adapters(module: ModuleType) -> List[type]:
 
     return adapters
 
+
+def _inner_optimization(prop: Any, register: Dict[str, str], defs_key: str):
+    if prop.get("properties"):
+        _property_optimization(prop["properties"], register, defs_key)
+    elif prop.get("anyOf"):
+        [_property_optimization(p, register, defs_key) for p in prop["anyOf"]]
+    elif prop.get("oneOf"):
+        [_property_optimization(p, register, defs_key) for p in prop["oneOf"]]
+    elif prop.get("items"):
+        _property_optimization(prop, register, defs_key)
+
 def _property_optimization(value: dict, register: Dict[str, str], defs_key: str):
     for name, prop in value.get("properties", {}).items():
         prop_stringify = json.dumps(prop, sort_keys=True)
         if prop_stringify in register:
             value["properties"][name] = {"$ref": f"#/{defs_key}/{register[prop_stringify]}"}
-        elif prop.get("properties"):
-            _property_optimization(prop["properties"], register, defs_key)
-        elif prop.get("anyOf"):
-            [_property_optimization(p, register, defs_key) for p in prop["anyOf"]]
-        elif prop.get("oneOf"):
-            [_property_optimization(p, register, defs_key) for p in prop["oneOf"]]
+        else:
+            _inner_optimization(prop, register, defs_key)
     for key_type in ["anyOf", "oneOf"]:
         arr = value.get(key_type, [])
         for idx, prop in enumerate(arr):
             prop_stringify = json.dumps(prop, sort_keys=True)
             if prop_stringify in register:
                 arr[idx] = {"$ref": f"#/{defs_key}/{register[prop_stringify]}"}
-            elif prop.get("properties"):
-                _property_optimization(prop["properties"], register, defs_key)
-            elif prop.get("anyOf"):
-                [_property_optimization(p, register, defs_key) for p in prop["anyOf"]]
-            elif prop.get("oneOf"):
-                [_property_optimization(p, register, defs_key) for p in prop["oneOf"]]
+            else:
+                _inner_optimization(prop, register, defs_key)
+    if prop := value.get("items"):
+        prop_stringify = json.dumps(prop, sort_keys=True)
+        if prop_stringify in register:
+            value["items"] = {"$ref": f"#/{defs_key}/{register[prop_stringify]}"}
+        else:
+            _inner_optimization(prop, register, defs_key)
 
 
 def _ref_optimization(elements: dict, defs_key: str):
@@ -363,7 +372,6 @@ def _generate_json_schema(models: List[type], adapters: Optional[List[v2.TypeAda
                 master_schema["properties"][adapter_name] = {"$ref": f"#/{defs_key}/{adapter_name}"}
         if adapters:
             _ref_optimization(defs, defs_key)
-        
         return json.dumps(master_schema, indent=2)
 
 
@@ -394,6 +402,7 @@ def generate_typescript_defs(
     LOG.info("Finding pydantic models...")
 
     models = _extract_pydantic_models(_import_module(module))
+    adapters = _extract_pydantic_adapters(_import_module(module))
 
     if exclude:
         models = [
