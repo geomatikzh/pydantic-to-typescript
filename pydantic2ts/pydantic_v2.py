@@ -3,7 +3,7 @@ try:
 
     assert VERSION.startswith("2")
 
-    from pydantic import BaseModel, create_model
+    from pydantic import BaseModel, create_model, ConfigDict, TypeAdapter
 
     enabled = True
 except (ImportError, AssertionError, AttributeError):
