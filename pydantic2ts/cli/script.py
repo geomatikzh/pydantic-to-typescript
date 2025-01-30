@@ -199,7 +199,11 @@ def _inner_optimization(prop: Any, register: Dict[str, str], defs_key: str):
     elif prop.get("items"):
         _property_optimization(prop, register, defs_key)
 
+
 def _property_optimization(value: dict, register: Dict[str, str], defs_key: str):
+    if value.get("prefixItems"): # TODO: The node library struggles with "prefixItems" but can handle "items"
+        value["items"] = value["prefixItems"]
+        print(value)
     for name, prop in value.get("properties", {}).items():
         prop_stringify = json.dumps(prop, sort_keys=True)
         if prop_stringify in register:
@@ -221,6 +225,20 @@ def _property_optimization(value: dict, register: Dict[str, str], defs_key: str)
         else:
             _inner_optimization(prop, register, defs_key)
 
+def _correct_tuples(value: dict|list):
+    if isinstance(value, list):
+        for item in value:
+            _correct_tuples(item)
+        return
+    if not isinstance(value, dict):
+        return
+    if value.get("prefixItems") and value.get("minItems") and value.get("maxItems") == value.get("minItems"):
+        value["items"] = value["prefixItems"]
+        del value["prefixItems"]
+        _correct_tuples(value["items"])
+        return
+    for key, item in value.items():
+        _correct_tuples(item)
 
 def _ref_optimization(elements: dict, defs_key: str):
     register = {json.dumps(value, sort_keys=True): key for key, value in elements.items()}
@@ -370,6 +388,9 @@ def _generate_json_schema(models: List[type], adapters: Optional[List[v2.TypeAda
             if adapter_name:
                 defs[adapter_name] = adapter_schema
                 master_schema["properties"][adapter_name] = {"$ref": f"#/{defs_key}/{adapter_name}"}
+
+        _correct_tuples(defs)
+
         if adapters:
             _ref_optimization(defs, defs_key)
         return json.dumps(master_schema, indent=2)
@@ -380,6 +401,7 @@ def generate_typescript_defs(
     output: str,
     exclude: Tuple[str, ...] = (),
     json2ts_cmd: str = "json2ts",
+    schema_path: str = ""
 ) -> None:
     """
     Convert the pydantic models in a python module into typescript interfaces.
@@ -421,6 +443,9 @@ def generate_typescript_defs(
 
     with open(schema_file_path, "w") as f:
         f.write(schema)
+    if schema_path:
+        with open(schema_path, "w") as f:
+            f.write(schema)
 
     LOG.info("Converting JSON schema to typescript definitions...")
 
