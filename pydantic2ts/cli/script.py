@@ -190,7 +190,9 @@ def _extract_pydantic_adapters(module: ModuleType) -> List[type]:
 
 
 def _inner_optimization(prop: Any, register: Dict[str, str], defs_key: str):
-    if prop.get("properties"):
+    if isinstance(prop, list):
+        [_property_optimization(p, register, defs_key) for p in prop]
+    elif prop.get("properties"):
         _property_optimization(prop["properties"], register, defs_key)
     elif prop.get("anyOf"):
         [_property_optimization(p, register, defs_key) for p in prop["anyOf"]]
@@ -201,9 +203,6 @@ def _inner_optimization(prop: Any, register: Dict[str, str], defs_key: str):
 
 
 def _property_optimization(value: dict, register: Dict[str, str], defs_key: str):
-    if value.get("prefixItems"): # TODO: The node library struggles with "prefixItems" but can handle "items"
-        value["items"] = value["prefixItems"]
-        print(value)
     for name, prop in value.get("properties", {}).items():
         prop_stringify = json.dumps(prop, sort_keys=True)
         if prop_stringify in register:
